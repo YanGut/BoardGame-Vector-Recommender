@@ -1,3 +1,4 @@
+import pytest
 from haystack.testing.document_store import DocumentStoreBaseTests
 from haystack_integrations.document_stores.example_store import ExampleDocumentStore
 
