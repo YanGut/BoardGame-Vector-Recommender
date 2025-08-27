@@ -1,6 +1,8 @@
 import os
 
-from haystack import Pipeline
+from tqdm import tqdm
+
+from haystack import Pipeline, Document
 
 from haystack_integrations.components.embedders.ollama import OllamaDocumentEmbedder
 from haystack_integrations.components.embedders.ollama import OllamaTextEmbedder
@@ -9,7 +11,13 @@ from haystack_integrations.components.retrievers.chroma import ChromaEmbeddingRe
 
 from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 
-from ..utils.chroma_setup import get_chroma_store
+from haystack.components.writers import DocumentWriter
+from haystack.document_stores.types import DuplicatePolicy
+
+from typing import List
+
+from src.utils.chroma_setup import get_chroma_store
+from src.utils.prepare_haystack_docs import prepare_haystack_documents
 
 class RecommendationService:    
     def __init__(self) -> None:
@@ -17,42 +25,6 @@ class RecommendationService:
         self.query_pipeline: Pipeline = self._create_query_pipeline()
         self.ollama_embed_model: str = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
         self.ollama_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-
-    def _create_query_pipeline(self) -> Pipeline:
-        """
-        Create an Haystack query pipeline for retrieving game recommendations.
-        This pipeline uses a ChromaQueryTextRetriever to fetch documents based on text queries.
-        The embedding function is expected to be set in the document store.
-        The pipeline is initialized with the document store's embedding function.
-        This function raises a ValueError if the document store does not have an embedding function configured.
-        
-        Returns:
-            Pipeline: An instance of Haystack's Pipeline configured with a retriever.
-
-        Raises:
-            ValueError: If the document store does not have an embedding function configured.
-        """
-        ollama_embed_model: str = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-        ollama_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        
-        embedding_function: OllamaTextEmbedder = OllamaTextEmbedder(
-            model=ollama_embed_model,
-            url=ollama_url,
-        )
-        if not embedding_function:
-            raise ValueError("The document store does not have an embedding function configured.")
-        
-        embedding_retriever: ChromaEmbeddingRetriever = ChromaEmbeddingRetriever(
-            document_store=self.document_store,
-        )
-        
-        query_pipeline: Pipeline = Pipeline()
-        query_pipeline.add_component("text_embedder", embedding_function)
-        query_pipeline.add_component("embedding_retriever", embedding_retriever)
-        
-        query_pipeline.connect('text_embedder.embedding', 'embedding_retriever.query_embedding')
-        
-        return query_pipeline
 
     def recommend_games(self, query_text: str, top_k: int = 5) -> list[dict]:
         """Busca por jogos baseados em uma query textual."""
@@ -180,5 +152,76 @@ class RecommendationService:
         except Exception as e:
             print(f"Erro ao listar jogos: {e}")
             return {"page": page, "per_page": per_page, "total": 0, "games": []}
+    
+    def insert_game(self, game_data: dict) -> bool:
+        """
+        Insere um novo jogo no ChromaDB.
+        game_data deve conter os campos necessários para criar um documento.
+        """
+        try:
+            boardgames_data: list[dict] = [game_data]
+            
+            haystack_docs: list[Document] = prepare_haystack_documents(boardgames_data=boardgames_data)
+            
+            self.ollama_embed_model.run(haystack_docs)
+            
+            writer: DocumentWriter = DocumentWriter(
+                document_store=self.document_store,
+                policy=DuplicatePolicy.OVERWRITE
+            )
+            
+            indexing_pipeline: Pipeline = Pipeline()
+            indexing_pipeline.add_component("embedder", self.ollama_embed_model)
+            indexing_pipeline.add_component("writer", writer)
+            indexing_pipeline.connect("embedder.documents", "writer.documents")
+            
+            batch_size: int = 64
+            
+            for i in tqdm(range(0, len(haystack_docs), batch_size), desc="Indexando documentos em lotes"):
+                batch_docs: List[Document] = haystack_docs[i:i + batch_size]
+                indexing_pipeline.run({
+                    "embedder": {"documents": batch_docs},
+                })
+
+            return True
+        except Exception as e:
+            print(f"Erro ao inserir jogo: {e}")
+            return False
+
+    def _create_query_pipeline(self) -> Pipeline:
+        """
+        Create an Haystack query pipeline for retrieving game recommendations.
+        This pipeline uses a ChromaQueryTextRetriever to fetch documents based on text queries.
+        The embedding function is expected to be set in the document store.
+        The pipeline is initialized with the document store's embedding function.
+        This function raises a ValueError if the document store does not have an embedding function configured.
+        
+        Returns:
+            Pipeline: An instance of Haystack's Pipeline configured with a retriever.
+
+        Raises:
+            ValueError: If the document store does not have an embedding function configured.
+        """
+        ollama_embed_model: str = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+        ollama_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        
+        embedding_function: OllamaTextEmbedder = OllamaTextEmbedder(
+            model=ollama_embed_model,
+            url=ollama_url,
+        )
+        if not embedding_function:
+            raise ValueError("The document store does not have an embedding function configured.")
+        
+        embedding_retriever: ChromaEmbeddingRetriever = ChromaEmbeddingRetriever(
+            document_store=self.document_store,
+        )
+        
+        query_pipeline: Pipeline = Pipeline()
+        query_pipeline.add_component("text_embedder", embedding_function)
+        query_pipeline.add_component("embedding_retriever", embedding_retriever)
+        
+        query_pipeline.connect('text_embedder.embedding', 'embedding_retriever.query_embedding')
+        
+        return query_pipeline
 
 recommendation_service_instance = RecommendationService()
