@@ -5,3 +5,4 @@ tqdm
 haystack-ai
 chroma-haystack
 ollama-haystack
+flasgger

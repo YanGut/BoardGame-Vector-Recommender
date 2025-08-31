@@ -2,11 +2,13 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 import os
+from flasgger import Flasgger
 
 def create_app():
   app = Flask(__name__)
   
   CORS(app)
+  Flasgger(app)
   
   app.config.from_object('src.config.config.Config')
   
