@@ -92,55 +92,61 @@ class RecommendationService:
 
     def list_all_games(self, page: int = 1, per_page: int = 20):
         """
-        Lista jogos de forma paginada.
-        NOTA: A paginação eficiente em bancos vetoriais pode ser complexa.
-        ChromaDB oferece `offset` e `limit` na query direta, mas via Haystack
-        `filter_documents` ou `get_all_documents` pode ser menos direto para paginação eficiente.
-        Esta é uma implementação simples e pode não ser performática para datasets muito grandes.
+        Lists games with efficient, database-side pagination.
+        This implementation directly uses the underlying ChromaDB client to fetch
+        only the required page of documents, ensuring scalability.
         """
         try:
-            # Haystack DocumentStore não tem um método de paginação direto fácil
-            # A abordagem de pegar muitos e fatiar é o que você tinha,
-            # mas ChromaDB em si suporta offset/limit em queries nativas.
-            # Para uma solução mais robusta, você poderia:
-            # 1. Usar client ChromaDB diretamente para queries com offset/limit (fora do pipeline Haystack para esta rota).
-            # 2. Se o número de jogos não for gigantesco, a abordagem atual pode ser aceitável.
+            # Access the native ChromaDB collection object from the Haystack DocumentStore.
+            # Note: Accessing internal attributes like `._collection` can be fragile if
+            # the Haystack library changes, but it's necessary for this performance optimization.
+            collection = self.document_store._collection
 
-            # Tentativa com `get_all_documents` e fatiamento manual (pode ser ineficiente)
-            # Esta é uma limitação comum; bancos vetoriais são otimizados para busca por similaridade.
-            # Para listagem geral, um banco de dados tradicional ainda pode ser mais adequado
-            # ou usar filtros se a busca por "todos" não for realmente "todos" mas "todos que correspondem a X".
+            # Get the total number of documents for pagination metadata.
+            total_games = collection.count()
 
-            # Para simplificar, vamos manter a lógica de buscar muitos e fatiar,
-            # ciente de suas limitações de performance.
-            # A query "game" que você usava é uma forma de tentar pegar todos.
-            # Uma alternativa seria usar `document_store.get_all_documents()` mas pode ser pesado.
-            
-            # Usando a mesma lógica de antes, mas com o pipeline do serviço:
-            # A query vazia ou genérica pode não ser a melhor forma.
-            # Se ChromaDB/Haystack tiver um `get_all_documents_paginated` seria ideal.
-            # Por ora, vamos adaptar sua lógica anterior:
-            
-            # Simula uma busca genérica para obter documentos. Não é o ideal para "listar todos".
-            # Você pode querer um endpoint que aceite filtros em vez de "listar tudo".
-            results_for_pagination = self.query_pipeline.run({"retriever": {"query": "", "top_k": 10000}}) # Tentar pegar um número grande
-            
-            all_docs = []
-            if results_for_pagination and "retriever" in results_for_pagination and "documents" in results_for_pagination["retriever"]:
-                all_docs = results_for_pagination["retriever"]["documents"]
+            # Calculate limit and offset for database-side pagination.
+            limit = per_page
+            offset = (page - 1) * per_page
 
-            total_games = len(all_docs)
-            start_index = (page - 1) * per_page
-            end_index = start_index + per_page
-            paginated_docs = all_docs[start_index:end_index]
+            # Fetch the specific page of documents using the native client's get() method.
+            # We request metadatas and the document content itself.
+            paginated_results = collection.get(
+                limit=limit,
+                offset=offset,
+                include=["metadatas", "documents"]
+            )
 
             games_list = []
-            for doc in paginated_docs:
+            # The native client returns separate lists for ids, metadatas, and documents.
+            # We need to zip them together to reconstruct each game.
+            ids = paginated_results['ids']
+            metadatas = paginated_results['metadatas']
+            contents = paginated_results['documents']
+
+            for i in range(len(ids)):
+                doc_id = ids[i]
+                meta = metadatas[i]
+                content = contents[i]
+                
                 games_list.append({
-                    "id_mysql": doc.meta.get("id_mysql"),
-                    "id_chroma": doc.id,
-                    "name": doc.meta.get("name"),
-                    # Adicione outros campos meta
+                    "id_mysql": meta.get("mysql_id"),
+                    "id_chroma": doc_id,
+                    "description": content,
+                    "nmJogo": meta.get("title"),
+                    "thumb": meta.get("thumbnail"),
+                    "idadeMinima": meta.get("min_age"),
+                    "qtJogadoresMin": meta.get("min_players"),
+                    "qtJogadoresMax": meta.get("max_players"),
+                    "vlTempoJogo": meta.get("play_time_minutes"),
+                    "anoPublicacao": meta.get("ano_publicacao", 0),
+                    "anoNacional": meta.get("ano_nacional", 0),
+                    "tpJogo": meta.get("game_type"),
+                    "artistas": meta.get("artists_list", []),
+                    "designers": meta.get("designers_list", []),
+                    "categorias": meta.get("categories_list", []),
+                    "mecanicas": meta.get("mechanics_list", []),
+                    "temas": meta.get("themes_list", []),
                 })
             
             return {
@@ -150,7 +156,8 @@ class RecommendationService:
                 "games": games_list
             }
         except Exception as e:
-            print(f"Erro ao listar jogos: {e}")
+            # It's good practice to log the specific error.
+            print(f"Error listing games with direct pagination: {e}")
             return {"page": page, "per_page": per_page, "total": 0, "games": []}
     
     def insert_game(self, game_data: dict) -> bool:
