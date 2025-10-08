@@ -1,5 +1,8 @@
 from flask import Blueprint, request, jsonify
+from pydantic import ValidationError
 from src.services.recommendation_service import recommendation_service_instance
+from src.services.group_service import group_service_instance
+from src.dtos.group_dtos import CriarGruposRequest, CriarGruposResponse
 
 reco_bp = Blueprint('recommendations', __name__)
 
@@ -24,6 +27,167 @@ def health_check():
               example: Recommendation service is healthy
     """
     return jsonify({"status": "ok", "message": "Recommendation service is healthy"})
+
+@reco_bp.route("/groups", methods=["POST"])
+def create_groups():
+    """
+    Create player groups for an event.
+    ---
+    tags:
+      - Groups
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          id: CriarGruposRequest
+          properties:
+            eventoId:
+              type: integer
+              description: The ID of the event.
+              example: 1
+            quantidadeMesas:
+              type: integer
+              description: The number of tables/groups to create.
+              example: 2
+            restricoes:
+              type: object
+              description: Optional constraints for group creation.
+              properties:
+                tamanhoMinimoMesa:
+                  type: integer
+                  example: 3
+                tamanhoMaximoMesa:
+                  type: integer
+                  example: 5
+                duracaoMaxima:
+                  type: integer
+                  example: 180
+            jogadores:
+              type: array
+              items:
+                type: object
+                properties:
+                  idUsuario:
+                    type: integer
+                    example: 101
+                  nome:
+                    type: string
+                    example: "Alice"
+                  nivelExperiencia:
+                    type: string
+                    example: "iniciante"
+                  preferencias:
+                    type: object
+                    properties:
+                      mecanicasFavoritas:
+                        type: array
+                        items:
+                          type: string
+                        example: ["eurogame"]
+                      temasFavoritos:
+                        type: array
+                        items:
+                          type: string
+                        example: ["fantasia"]
+                      tempoDisponivel:
+                        type: integer
+                        example: 120
+    responses:
+      200:
+        description: Successfully created groups.
+        schema:
+          id: CriarGruposResponse
+          properties:
+            eventoId:
+              type: integer
+              example: 1
+            mesas:
+              type: array
+              items:
+                type: object
+                properties:
+                  mesaId:
+                    type: integer
+                    example: 1
+                  jogadores:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        idUsuario:
+                          type: integer
+                          example: 101
+                        nome:
+                          type: string
+                          example: "Alice"
+                        nivelExperiencia:
+                          type: string
+                          example: "iniciante"
+                        preferencias:
+                          type: object
+                          properties:
+                            mecanicasFavoritas:
+                              type: array
+                              items:
+                                type: string
+                              example: ["eurogame"]
+                            temasFavoritos:
+                              type: array
+                              items:
+                                type: string
+                              example: ["fantasia"]
+                            tempoDisponivel:
+                              type: integer
+                              example: 120
+                  perfilMesa:
+                    type: object
+                    properties:
+                      nivelPredominante:
+                        type: string
+                        example: "intermediario"
+                      mecanicasPredominantes:
+                        type: array
+                        items:
+                          type: string
+                        example: ["eurogame"]
+                      temasPredominantes:
+                        type: array
+                        items:
+                          type: string
+                        example: ["fantasia"]
+                      tempoMedioDisponivel:
+                        type: integer
+                        example: 120
+                  jogosRecomendados:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        idJogo:
+                          type: integer
+                          example: 101
+                        nome:
+                          type: string
+                          example: "Catan"
+                        similaridade:
+                          type: number
+                          format: float
+                          example: 0.85
+                        thumbnail:
+                          type: string
+                          example: "https://example.com/catan.jpg"
+      400:
+        description: Invalid request data.
+    """
+    try:
+        data = CriarGruposRequest.parse_raw(request.data)
+        response = group_service_instance.create_groups(data)
+        return jsonify(response.dict())
+    except ValidationError as e:
+        return jsonify({"error": e.errors()}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @reco_bp.route('/recommend', methods=['POST'])
 def recommend_games_route():
