@@ -13,6 +13,7 @@ from src.dtos.group_dtos import (
     MesaDTO,
     CriarGruposResponse
 )
+from src.dtos.recommendation_dtos import HybridRecommendationRequest
 
 def create_app():
   app = Flask(__name__)
@@ -29,6 +30,7 @@ def create_app():
       "PerfilMesaDTO": PerfilMesaDTO.model_json_schema(),
       "MesaDTO": MesaDTO.model_json_schema(),
       "CriarGruposResponse": CriarGruposResponse.model_json_schema(),
+      "HybridRecommendationRequest": HybridRecommendationRequest.model_json_schema(),
   }
 
   # Flasgger configuration

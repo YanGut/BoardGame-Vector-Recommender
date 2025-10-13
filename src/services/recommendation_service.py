@@ -59,6 +59,7 @@ class RecommendationService:
                         "categorias": doc.meta.get("categories_list", []),
                         "mecanicas": doc.meta.get("mechanics_list", []),
                         "temas": doc.meta.get("themes_list", []),
+                        "popularity_score": doc.meta.get("popularity_score", 0),
                         "score": doc.score
                     })
             return recommendations
@@ -67,19 +68,98 @@ class RecommendationService:
             # Considere lançar uma exceção customizada ou retornar um erro
             return []
 
+    def recommend_games_hybrid(
+        self, 
+        query_text: str, 
+        top_k: int = 10,
+        candidate_pool_size: int = 100,
+        semantic_weight: float = 0.7,
+        popularity_weight: float = 0.3
+    ) -> list[dict]:
+        """
+        Busca por jogos usando uma abordagem híbrida de re-ranking.
+        Combina a busca semântica com um score de popularidade pré-calculado.
+        """
+        try:
+            print(f"\n[Hybrid Search] Iniciando busca para query: '{query_text}'")
+            # 1. Aumentar o pool de candidatos
+            results = self.query_pipeline.run({
+                "text_embedder": {"text": query_text},
+                "embedding_retriever": {"top_k": candidate_pool_size}
+            })
+
+            if not (results and "embedding_retriever" in results and "documents" in results["embedding_retriever"]):
+                print("[Hybrid Search] Nenhum candidato inicial encontrado.")
+                return []
+
+            initial_candidates = results["embedding_retriever"]["documents"]
+            print(f"[Hybrid Search] {len(initial_candidates)} candidatos iniciais recuperados.")
+            
+            # 2. Implementar a lógica de re-ranking e formatação
+            final_ranked_list = []
+            for doc in initial_candidates:
+                semantic_score = doc.score
+                popularity_score = doc.meta.get("popularity_score", 0.0)
+                
+                final_score = (semantic_weight * semantic_score) + (popularity_weight * popularity_score)
+                
+                # Adicionar o documento completo e o score final à lista
+                final_ranked_list.append({
+                    "document": doc,
+                    "final_score": final_score
+                })
+
+            # 3. Ordenar e selecionar os Top N resultados
+            final_ranked_list.sort(key=lambda x: x["final_score"], reverse=True)
+            
+            top_n_results = final_ranked_list[:top_k]
+            
+            # 4. Formatar a resposta final diretamente dos documentos recuperados
+            final_recommendations = []
+            for res in top_n_results:
+                doc = res["document"]
+                game_details = {
+                    "id_mysql": doc.meta.get("mysql_id"),
+                    "id_chroma": doc.id,
+                    "description": doc.content,
+                    "nmJogo": doc.meta.get("title"),
+                    "thumb": doc.meta.get("thumbnail"),
+                    "idadeMinima": doc.meta.get("min_age"),
+                    "qtJogadoresMin": doc.meta.get("min_players"),
+                    "qtJogadoresMax": doc.meta.get("max_players"),
+                    "vlTempoJogo": doc.meta.get("play_time_minutes"),
+                    "anoPublicacao": doc.meta.get("ano_publicacao", 0),
+                    "anoNacional": doc.meta.get("ano_nacional", 0),
+                    "tpJogo": doc.meta.get("game_type"),
+                    "artistas": doc.meta.get("artists_list", []),
+                    "designers": doc.meta.get("designers_list", []),
+                    "categorias": doc.meta.get("categories_list", []),
+                    "mecanicas": doc.meta.get("mechanics_list", []),
+                    "temas": doc.meta.get("themes_list", []),
+                    "popularity_score": doc.meta.get("popularity_score", 0),
+                    "semantic_score": doc.score,
+                    "final_score": res["final_score"]
+                }
+                final_recommendations.append(game_details)
+
+            print(f"[Hybrid Search] Retornando {len(final_recommendations)} recomendações finais.")
+            return final_recommendations
+
+        except Exception as e:
+            print(f"Erro ao executar pipeline de recomendação híbrida: {e}")
+            return []
+
     def get_game_by_mysql_id(self, game_mysql_id: int) -> dict | None:
         """Busca um jogo pelo seu ID original do MySQL."""
-        # ChromaDB permite filtrar por metadados.
-        # Certifique-se que 'id_mysql' está no campo meta dos seus documentos.
         try:
-            # O método filter_documents retorna uma lista de documentos
-            # Não há garantia de que o ID é único se não for o ID primário do Chroma
-            filtered_docs = self.document_store.filter_documents(filters={"id_mysql": game_mysql_id})
+            # CORREÇÃO: Aplicando o formato de filtro estruturado para consistência.
+            filters = [{"field": "mysql_id", "operator": "==", "value": game_mysql_id}]
+            filtered_docs = self.document_store.filter_documents(filters=filters)
             
             if filtered_docs:
-                doc = filtered_docs[0] # Assume que o primeiro é o correto se houver múltiplos
+                doc = filtered_docs[0]
                 return {
-                    "id_mysql": doc.meta.get("id_mysql"),
+                    "id_mysql": doc.meta.get("mysql_id"),
                     "id_chroma": doc.id,
                     "name": doc.meta.get("name"),
                     "description": doc.content,

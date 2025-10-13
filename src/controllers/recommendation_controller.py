@@ -3,6 +3,7 @@ from pydantic import ValidationError
 from src.services.recommendation_service import recommendation_service_instance
 from src.services.group_service import group_service_instance
 from src.dtos.group_dtos import CriarGruposRequest, CriarGruposResponse
+from src.dtos.recommendation_dtos import HybridRecommendationRequest
 
 reco_bp = Blueprint('recommendations', __name__)
 
@@ -208,11 +209,12 @@ def recommend_games_route():
             query:
               type: string
               description: The text query to search for recommendations.
-              example: "A fun party game for 4-8 players"
             top_k:
               type: integer
               description: The number of recommendations to return.
-              default: 5
+          example:
+            query: "A fun party game for 4-8 players"
+            top_k: 5
     responses:
       200:
         description: A list of recommended games.
@@ -244,6 +246,65 @@ def recommend_games_route():
         "query": query,
         "recommendations": recommendations
     })
+
+@reco_bp.route('/recommend/hybrid', methods=['POST'])
+def recommend_games_hybrid_route():
+    """
+    Get hybrid board game recommendations with re-ranking.
+    ---
+    tags:
+      - Recommendations
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          id: HybridRecommendationRequest
+        examples:
+          default:
+            value:
+              query: "A fun party game for 4-8 players"
+              top_k: 10
+              candidate_pool_size: 100
+              semantic_weight: 0.6
+              popularity_weight: 0.4
+    responses:
+      200:
+        description: A list of re-ranked recommended games.
+        schema:
+          type: object
+          properties:
+            query:
+              type: string
+            recommendations:
+              type: array
+              items:
+                type: object
+      400:
+        description: Invalid request data.
+    """
+    try:
+        req_data = HybridRecommendationRequest.parse_raw(request.data)
+        
+        recommendations = recommendation_service_instance.recommend_games_hybrid(
+            query_text=req_data.query,
+            top_k=req_data.top_k,
+            candidate_pool_size=req_data.candidate_pool_size,
+            semantic_weight=req_data.semantic_weight,
+            popularity_weight=req_data.popularity_weight
+        )
+        
+        if recommendations is None:
+            return jsonify({"error": "Falha ao obter recomendações híbridas"}), 500
+            
+        return jsonify({
+            "query": req_data.query,
+            "recommendations": recommendations
+        })
+    except ValidationError as e:
+        return jsonify({"error": e.errors()}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @reco_bp.route('/games', methods=['GET'])
 def list_games_route():
