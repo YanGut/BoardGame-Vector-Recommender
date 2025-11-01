@@ -6,3 +6,4 @@ haystack-ai
 chroma-haystack
 ollama-haystack
 flasgger
+scikit-learn
