@@ -1,67 +1,45 @@
 import os
 
-from tqdm import tqdm
-
 from haystack import Pipeline, Document
-
 from haystack_integrations.components.embedders.ollama import OllamaDocumentEmbedder
-from haystack_integrations.components.embedders.ollama import OllamaTextEmbedder
-from haystack_integrations.components.retrievers.chroma import ChromaQueryTextRetriever
-from haystack_integrations.components.retrievers.chroma import ChromaEmbeddingRetriever
-
 from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 
-from haystack.components.writers import DocumentWriter
-from haystack.document_stores.types import DuplicatePolicy
-
-from typing import List
-
+from src.repositories.game_repository import GameRepository
 from src.utils.chroma_setup import get_chroma_store
 from src.utils.prepare_haystack_docs import prepare_haystack_documents
+from src.services.recommendation import (
+    build_query_pipeline,
+    document_to_game_dict,
+    document_to_hybrid_game_dict,
+    hybrid_rank,
+    run_text_retrieval,
+)
 
 class RecommendationService:    
     def __init__(self) -> None:
         self.document_store: ChromaDocumentStore = get_chroma_store()
-        self.query_pipeline: Pipeline = self._create_query_pipeline()
-        self.ollama_embed_model: str = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-        self.ollama_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        self.repository: GameRepository = GameRepository(self.document_store)
+
+        embed_model_name = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+        ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+        self.document_embedder = OllamaDocumentEmbedder(
+            model=embed_model_name,
+            url=ollama_url,
+        )
+
+        self.query_pipeline: Pipeline = build_query_pipeline(self.document_store)
 
     def recommend_games(self, query_text: str, top_k: int = 5) -> list[dict]:
         """Busca por jogos baseados em uma query textual."""
         try:
-            results = self.query_pipeline.run({
-                "text_embedder": {"text": query_text},
-                "embedding_retriever": {"top_k": top_k}
-            })
-
+            documents = run_text_retrieval(self.query_pipeline, query_text, top_k)
             recommendations: list[dict] = []
             
-            print(f"Results: {results}")
-            print(f"Results type: {type(results)}")
+            print(f"Retrieved {len(documents)} documents for query '{query_text}'.")
 
-            if results and "embedding_retriever" in results and "documents" in results["embedding_retriever"]:
-                for doc in results["embedding_retriever"]["documents"]:
-                    recommendations.append({
-                        "id_mysql": doc.meta.get("mysql_id"), # ID original do MySQL
-                        "id_chroma": doc.id, # ID do documento no ChromaDB
-                        "description": doc.content, # Conteúdo que foi embeddado
-                        "nmJogo": doc.meta.get("title"),
-                        "thumb": doc.meta.get("thumbnail"),
-                        "idadeMinima": doc.meta.get("min_age"),
-                        "qtJogadoresMin": doc.meta.get("min_players"),
-                        "qtJogadoresMax": doc.meta.get("max_players"),
-                        "vlTempoJogo": doc.meta.get("play_time_minutes"),
-                        "anoPublicacao": doc.meta.get("ano_publicacao", 0),
-                        "anoNacional": doc.meta.get("ano_nacional", 0),
-                        "tpJogo": doc.meta.get("game_type"),
-                        "artistas": doc.meta.get("artists_list", []),
-                        "designers": doc.meta.get("designers_list", []),
-                        "categorias": doc.meta.get("categories_list", []),
-                        "mecanicas": doc.meta.get("mechanics_list", []),
-                        "temas": doc.meta.get("themes_list", []),
-                        "popularity_score": doc.meta.get("popularity_score", 0),
-                        "score": doc.score
-                    })
+            for doc in documents:
+                recommendations.append(document_to_game_dict(doc))
             return recommendations
         except Exception as e:
             print(f"Erro ao executar pipeline de recomendação: {e}")
@@ -83,64 +61,26 @@ class RecommendationService:
         try:
             print(f"\n[Hybrid Search] Iniciando busca para query: '{query_text}'")
             # 1. Aumentar o pool de candidatos
-            results = self.query_pipeline.run({
-                "text_embedder": {"text": query_text},
-                "embedding_retriever": {"top_k": candidate_pool_size}
-            })
+            documents = run_text_retrieval(self.query_pipeline, query_text, candidate_pool_size)
 
-            if not (results and "embedding_retriever" in results and "documents" in results["embedding_retriever"]):
+            if not documents:
                 print("[Hybrid Search] Nenhum candidato inicial encontrado.")
                 return []
 
-            initial_candidates = results["embedding_retriever"]["documents"]
+            initial_candidates = documents
             print(f"[Hybrid Search] {len(initial_candidates)} candidatos iniciais recuperados.")
             
-            # 2. Implementar a lógica de re-ranking e formatação
-            final_ranked_list = []
-            for doc in initial_candidates:
-                semantic_score = doc.score
-                popularity_score = doc.meta.get("popularity_score", 0.0)
-                
-                final_score = (semantic_weight * semantic_score) + (popularity_weight * popularity_score)
-                
-                # Adicionar o documento completo e o score final à lista
-                final_ranked_list.append({
-                    "document": doc,
-                    "final_score": final_score
-                })
+            ranked_results = hybrid_rank(
+                documents=initial_candidates,
+                semantic_weight=semantic_weight,
+                popularity_weight=popularity_weight,
+                top_k=top_k,
+            )
 
-            # 3. Ordenar e selecionar os Top N resultados
-            final_ranked_list.sort(key=lambda x: x["final_score"], reverse=True)
-            
-            top_n_results = final_ranked_list[:top_k]
-            
-            # 4. Formatar a resposta final diretamente dos documentos recuperados
-            final_recommendations = []
-            for res in top_n_results:
-                doc = res["document"]
-                game_details = {
-                    "id_mysql": doc.meta.get("mysql_id"),
-                    "id_chroma": doc.id,
-                    "description": doc.content,
-                    "nmJogo": doc.meta.get("title"),
-                    "thumb": doc.meta.get("thumbnail"),
-                    "idadeMinima": doc.meta.get("min_age"),
-                    "qtJogadoresMin": doc.meta.get("min_players"),
-                    "qtJogadoresMax": doc.meta.get("max_players"),
-                    "vlTempoJogo": doc.meta.get("play_time_minutes"),
-                    "anoPublicacao": doc.meta.get("ano_publicacao", 0),
-                    "anoNacional": doc.meta.get("ano_nacional", 0),
-                    "tpJogo": doc.meta.get("game_type"),
-                    "artistas": doc.meta.get("artists_list", []),
-                    "designers": doc.meta.get("designers_list", []),
-                    "categorias": doc.meta.get("categories_list", []),
-                    "mecanicas": doc.meta.get("mechanics_list", []),
-                    "temas": doc.meta.get("themes_list", []),
-                    "popularity_score": doc.meta.get("popularity_score", 0),
-                    "semantic_score": doc.score,
-                    "final_score": res["final_score"]
-                }
-                final_recommendations.append(game_details)
+            final_recommendations = [
+                document_to_hybrid_game_dict(doc, final_score=score)
+                for doc, score in ranked_results
+            ]
 
             print(f"[Hybrid Search] Retornando {len(final_recommendations)} recomendações finais.")
             return final_recommendations
@@ -152,20 +92,14 @@ class RecommendationService:
     def get_game_by_mysql_id(self, game_mysql_id: int) -> dict | None:
         """Busca um jogo pelo seu ID original do MySQL."""
         try:
-            # CORREÇÃO: Aplicando o formato de filtro estruturado para consistência.
-            filters = [{"field": "mysql_id", "operator": "==", "value": game_mysql_id}]
-            filtered_docs = self.document_store.filter_documents(filters=filters)
-            
-            if filtered_docs:
-                doc = filtered_docs[0]
-                return {
-                    "id_mysql": doc.meta.get("mysql_id"),
-                    "id_chroma": doc.id,
-                    "name": doc.meta.get("name"),
-                    "description": doc.content,
-                    # Adicione outros campos meta
-                }
-            return None
+            doc = self.repository.get_by_mysql_id(game_mysql_id)
+            if not doc:
+                return None
+
+            game_payload = document_to_game_dict(doc)
+            # Preserva campo legacy 'name' usado anteriormente no endpoint.
+            game_payload["name"] = doc.meta.get("name")
+            return game_payload
         except Exception as e:
             print(f"Erro ao buscar jogo por ID MySQL {game_mysql_id}: {e}")
             return None
@@ -177,61 +111,12 @@ class RecommendationService:
         only the required page of documents, ensuring scalability.
         """
         try:
-            # Access the native ChromaDB collection object from the Haystack DocumentStore.
-            # Note: Accessing internal attributes like `._collection` can be fragile if
-            # the Haystack library changes, but it's necessary for this performance optimization.
-            collection = self.document_store._collection
-
-            # Get the total number of documents for pagination metadata.
-            total_games = collection.count()
-
-            # Calculate limit and offset for database-side pagination.
-            limit = per_page
-            offset = (page - 1) * per_page
-
-            # Fetch the specific page of documents using the native client's get() method.
-            # We request metadatas and the document content itself.
-            paginated_results = collection.get(
-                limit=limit,
-                offset=offset,
-                include=["metadatas", "documents"]
-            )
-
-            games_list = []
-            # The native client returns separate lists for ids, metadatas, and documents.
-            # We need to zip them together to reconstruct each game.
-            ids = paginated_results['ids']
-            metadatas = paginated_results['metadatas']
-            contents = paginated_results['documents']
-
-            for i in range(len(ids)):
-                doc_id = ids[i]
-                meta = metadatas[i]
-                content = contents[i]
-                
-                games_list.append({
-                    "id_mysql": meta.get("mysql_id"),
-                    "id_chroma": doc_id,
-                    "description": content,
-                    "nmJogo": meta.get("title"),
-                    "thumb": meta.get("thumbnail"),
-                    "idadeMinima": meta.get("min_age"),
-                    "qtJogadoresMin": meta.get("min_players"),
-                    "qtJogadoresMax": meta.get("max_players"),
-                    "vlTempoJogo": meta.get("play_time_minutes"),
-                    "anoPublicacao": meta.get("ano_publicacao", 0),
-                    "anoNacional": meta.get("ano_nacional", 0),
-                    "tpJogo": meta.get("game_type"),
-                    "artistas": meta.get("artists_list", []),
-                    "designers": meta.get("designers_list", []),
-                    "categorias": meta.get("categories_list", []),
-                    "mecanicas": meta.get("mechanics_list", []),
-                    "temas": meta.get("themes_list", []),
-                })
+            documents, total_games, normalized_page, normalized_per_page = self.repository.list_paginated(page, per_page)
+            games_list = [document_to_game_dict(doc) for doc in documents]
             
             return {
-                "page": page,
-                "per_page": per_page,
+                "page": normalized_page,
+                "per_page": normalized_per_page,
                 "total": total_games,
                 "games": games_list
             }
@@ -249,66 +134,15 @@ class RecommendationService:
             boardgames_data: list[dict] = [game_data]
             
             haystack_docs: list[Document] = prepare_haystack_documents(boardgames_data=boardgames_data)
-            
-            self.ollama_embed_model.run(haystack_docs)
-            
-            writer: DocumentWriter = DocumentWriter(
-                document_store=self.document_store,
-                policy=DuplicatePolicy.OVERWRITE
+
+            self.repository.index_documents(
+                documents=haystack_docs,
+                embedder=self.document_embedder,
             )
-            
-            indexing_pipeline: Pipeline = Pipeline()
-            indexing_pipeline.add_component("embedder", self.ollama_embed_model)
-            indexing_pipeline.add_component("writer", writer)
-            indexing_pipeline.connect("embedder.documents", "writer.documents")
-            
-            batch_size: int = 64
-            
-            for i in tqdm(range(0, len(haystack_docs), batch_size), desc="Indexando documentos em lotes"):
-                batch_docs: List[Document] = haystack_docs[i:i + batch_size]
-                indexing_pipeline.run({
-                    "embedder": {"documents": batch_docs},
-                })
 
             return True
         except Exception as e:
             print(f"Erro ao inserir jogo: {e}")
             return False
-
-    def _create_query_pipeline(self) -> Pipeline:
-        """
-        Create an Haystack query pipeline for retrieving game recommendations.
-        This pipeline uses a ChromaQueryTextRetriever to fetch documents based on text queries.
-        The embedding function is expected to be set in the document store.
-        The pipeline is initialized with the document store's embedding function.
-        This function raises a ValueError if the document store does not have an embedding function configured.
-        
-        Returns:
-            Pipeline: An instance of Haystack's Pipeline configured with a retriever.
-
-        Raises:
-            ValueError: If the document store does not have an embedding function configured.
-        """
-        ollama_embed_model: str = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-        ollama_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        
-        embedding_function: OllamaTextEmbedder = OllamaTextEmbedder(
-            model=ollama_embed_model,
-            url=ollama_url,
-        )
-        if not embedding_function:
-            raise ValueError("The document store does not have an embedding function configured.")
-        
-        embedding_retriever: ChromaEmbeddingRetriever = ChromaEmbeddingRetriever(
-            document_store=self.document_store,
-        )
-        
-        query_pipeline: Pipeline = Pipeline()
-        query_pipeline.add_component("text_embedder", embedding_function)
-        query_pipeline.add_component("embedding_retriever", embedding_retriever)
-        
-        query_pipeline.connect('text_embedder.embedding', 'embedding_retriever.query_embedding')
-        
-        return query_pipeline
 
 recommendation_service_instance = RecommendationService()
