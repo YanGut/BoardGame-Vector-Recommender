@@ -1,6 +1,39 @@
 version: '3.8'
 
 services:
+  # 1) Serviço one-shot só para baixar os modelos
+  ollama_pull:
+    image: ollama/ollama:latest
+    container_name: boardgames-ollama-pull
+    volumes:
+      - ollama_data:/root/.ollama
+    entrypoint: ["/bin/sh", "-lc"]
+    # Adicione aqui todos os modelos que quiser pré-baixar
+    command: >
+      ollama pull nomic-embed-text
+    restart: "no"
+
+  # 2) Servidor Ollama (só sobe depois que o pull terminar com sucesso)
+  ollama_server:
+    image: ollama/ollama:latest
+    container_name: boardgames-ollama
+    depends_on:
+      ollama_pull:
+        condition: service_completed_successfully
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # GPUs (opcional)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # 3) Sua API Flask
   api:
     build: .
     container_name: boardgames-api
@@ -11,24 +44,12 @@ services:
         condition: service_started
     env_file:
       - .env
+    environment:
+      # para o Haystack/Ollama: http://<nome-do-serviço>:11434
+      OLLAMA_HOST: http://ollama_server:11434
     volumes:
-      - .:/app
-
-  ollama_server:
-    image: ollama/ollama:latest
-    container_name: boardgames-ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    # Para GPUs (opcional):
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all # ou 1
-    #           capabilities: [gpu]
+      # monte apenas o que precisa; evite sobrescrever /app inteiro
+      - ./data/vector_databases/chromadb:/app/data/vector_databases/chromadb
 
 volumes:
   ollama_data:
