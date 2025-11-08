@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from collections import Counter
-from statistics import mean
 from typing import Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import numpy as np
-from sklearn.cluster import KMeans
-from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.cluster import DBSCAN
+from sklearn.metrics.pairwise import cosine_distances, cosine_similarity
+from sklearn.preprocessing import normalize
 
 from src.dtos.group_dtos import (
     CriarGruposRequest,
@@ -41,48 +41,50 @@ class GroupService:
         if not jogadores:
             raise ValueError("Nenhum jogador informado para criação de grupos.")
 
-        quantidade_mesas = request_data.quantidadeMesas
-        if quantidade_mesas <= 0:
-            raise ValueError("A quantidade de mesas deve ser maior que zero.")
-        if quantidade_mesas > len(jogadores):
-            raise ValueError("Quantidade de mesas maior que o número de jogadores disponível.")
-
         restricoes = request_data.restricoes
         minimo = restricoes.tamanhoMinimoMesa if restricoes and restricoes.tamanhoMinimoMesa else 1
         maximo = restricoes.tamanhoMaximoMesa if restricoes and restricoes.tamanhoMaximoMesa else max(len(jogadores), minimo)
         maximo = max(maximo, minimo)
-        limite_duracao = restricoes.duracaoMaxima if restricoes else None
-
-        if len(jogadores) < minimo * quantidade_mesas:
-            raise ValueError("Número de jogadores insuficiente para cumprir o tamanho mínimo das mesas.")
-        if len(jogadores) > maximo * quantidade_mesas:
-            raise ValueError("Número de jogadores excede a capacidade máxima configurada para as mesas.")
 
         perfis_textuais = [self._generate_player_profile_string(j) for j in jogadores]
         embeddings = self.embedding_service.get_embeddings(perfis_textuais)
         if len(embeddings) != len(jogadores):
             raise ValueError("Falha ao gerar embeddings para todos os jogadores.")
 
-        embedding_matrix = np.array(embeddings)
+        embedding_matrix = normalize(np.array(embeddings))
 
-        kmeans = KMeans(n_clusters=quantidade_mesas, random_state=42, n_init=10)
-        kmeans.fit(embedding_matrix)
+        eps = restricoes.dbscanEps if restricoes and restricoes.dbscanEps else 0.35
+        min_samples = restricoes.dbscanMinSamples if restricoes and restricoes.dbscanMinSamples else 2
 
-        initial_tables = self._build_initial_tables(kmeans.labels_, len(jogadores), quantidade_mesas)
-        similarity_matrix = cosine_similarity(embedding_matrix, kmeans.cluster_centers_)
+        distance_matrix = cosine_distances(embedding_matrix)
+        clustering = DBSCAN(eps=eps, min_samples=min_samples, metric="precomputed")
+        clustering.fit(distance_matrix)
 
-        rebalanced_tables = self._rebalance_tables(
-            tables=initial_tables,
-            similarity_matrix=similarity_matrix,
-            min_size=minimo,
-            max_size=maximo,
-        )
+        labels = clustering.labels_
+        tables, outliers = self._build_tables_from_labels(labels)
+        
+        print("\n--- [DEBUG] INÍCIO DO PROCESSO DE GRUPO ---")
+        print(f"[DEBUG] Jogadores: {len(jogadores)}, Min/Max: {minimo}/{maximo}, EPS: {eps}, MinSamples: {min_samples}")
+        print(f"[DEBUG] DBSCAN Labels: {labels}")
+        print(f"[DEBUG] Mesas iniciais (Clusters): {tables}")
+        print(f"[DEBUG] Outliers: {outliers}")
+
+        self._assign_outliers(tables, outliers, embedding_matrix, maximo)
+        
+        print(f"[DEBUG] Mesas após _assign_outliers: {tables}")
+        print(f"[DEBUG] Tamanhos: {[len(t) for t in tables]}")
+        print("--- [DEBUG] INICIANDO _enforce_size_bounds ---")
+        
+        self._enforce_size_bounds(tables, embedding_matrix, min_size=minimo, max_size=maximo)
+
+        if not tables:
+            raise ValueError("Nenhum agrupamento pôde ser formado com os parâmetros fornecidos.")
 
         mesas_response: List[MesaDTO] = []
-        for mesa_id, player_indices in enumerate(rebalanced_tables, start=1):
+        for mesa_id, player_indices in enumerate(tables, start=1):
             mesa_jogadores = [jogadores[idx] for idx in player_indices]
             perfil = self._create_table_profile(mesa_jogadores)
-            query = self._generate_table_profile_string(perfil, limite_duracao)
+            query = self._generate_table_profile_string(perfil)
 
             recomendacoes = self.recommendation_service.recommend_games_hybrid(
                 query_text=query,
@@ -92,7 +94,7 @@ class GroupService:
                 popularity_weight=0.4,
             )
 
-            jogos_recomendados = self._map_recommendations_to_dto(recomendacoes, limite_duracao)
+            jogos_recomendados = self._map_recommendations_to_dto(recomendacoes)
 
             mesas_response.append(
                 MesaDTO(
@@ -104,107 +106,290 @@ class GroupService:
             )
 
         return CriarGruposResponse(
-            eventoId=request_data.eventoId,
             mesas=mesas_response,
         )
 
-    def _build_initial_tables(
+    def _build_tables_from_labels(
         self,
         labels: Sequence[int],
-        player_count: int,
-        table_count: int,
-    ) -> List[List[int]]:
-        tables: List[List[int]] = [[] for _ in range(table_count)]
-        for player_idx in range(player_count):
-            label = labels[player_idx]
-            tables[label].append(player_idx)
-        return tables
+    ) -> Tuple[List[List[int]], List[int]]:
+        tables: dict[int, List[int]] = {}
+        outliers: List[int] = []
+        for idx, label in enumerate(labels):
+            if label == -1:
+                outliers.append(idx)
+            else:
+                tables.setdefault(label, []).append(idx)
+        # Sort tables by label to ensure deterministic ordering
+        sorted_tables = [tables[label] for label in sorted(tables.keys())]
+        return sorted_tables, outliers
 
-    def _rebalance_tables(
+    def _assign_outliers(
         self,
         tables: List[List[int]],
-        similarity_matrix: np.ndarray,
+        outliers: List[int],
+        embedding_matrix: np.ndarray,
+        max_size: int,
+    ) -> None:
+        if not outliers:
+            return
+        if not tables:
+            # Seed first table entirely from outliers if no clusters formed
+            while outliers:
+                tables.append([outliers.pop(0)])
+            return
+
+        centroids = self._compute_centroids(tables, embedding_matrix)
+        for player_idx in outliers:
+            similarities = [
+                self._cosine_similarity(embedding_matrix[player_idx], centroid)
+                for centroid in centroids
+            ]
+            best_table = None
+            best_similarity = None
+            for table_idx, similarity in enumerate(similarities):
+                if len(tables[table_idx]) >= max_size:
+                    continue
+                if best_similarity is None or similarity > best_similarity:
+                    best_similarity = similarity
+                    best_table = table_idx
+            if best_table is None:
+                tables.append([player_idx])
+                centroids.append(embedding_matrix[player_idx])
+            else:
+                tables[best_table].append(player_idx)
+                centroids[best_table] = self._compute_centroid(tables[best_table], embedding_matrix)
+
+    def _enforce_size_bounds(
+        self,
+        tables: List[List[int]],
+        embedding_matrix: np.ndarray,
         min_size: int,
         max_size: int,
-    ) -> List[List[int]]:
-        tables = [list(table) for table in tables]
-        table_count = len(tables)
+    ) -> None:
+        if not tables:
+            return
 
         for _ in range(MAX_REBALANCE_ITERATIONS):
+            print(f"\n[DEBUG] Iteração de Balanceamento #{_}")
+            print(f"[DEBUG] Estado atual das mesas: {tables}")
+            print(f"[DEBUG] Tamanhos: {[len(t) for t in tables]}")
+            
             changed = False
-            # Reduce oversized tables
-            for table_idx in range(table_count):
-                while len(tables[table_idx]) > max_size:
-                    player_idx = min(
-                        tables[table_idx],
-                        key=lambda idx: similarity_matrix[idx][table_idx],
-                    )
-                    target_tables = self._sorted_table_preferences(similarity_matrix[player_idx])
-                    moved = False
-                    for target_idx in target_tables:
-                        if target_idx == table_idx:
-                            continue
-                        if len(tables[target_idx]) < max_size:
-                            tables[table_idx].remove(player_idx)
-                            tables[target_idx].append(player_idx)
-                            changed = True
-                            moved = True
-                            break
-                    if not moved:
-                        break
+            centroids = self._compute_centroids(tables, embedding_matrix)
 
-            # Fill undersized tables
-            for table_idx in range(table_count):
-                while len(tables[table_idx]) < min_size:
-                    candidate = self._find_best_player_to_move(
-                        destination_table=table_idx,
-                        tables=tables,
-                        similarity_matrix=similarity_matrix,
-                        min_size=min_size,
-                    )
-                    if candidate is None:
-                        break
-                    player_idx, source_table = candidate
-                    tables[source_table].remove(player_idx)
-                    tables[table_idx].append(player_idx)
+            for idx, table in enumerate(list(tables)):
+                if len(table) == 0:
+                    print(f"[DEBUG] Mesa {idx} está vazia. Removendo.")
+                    tables.pop(idx)
+                    centroids.pop(idx)
                     changed = True
-
+                    continue
+                if len(table) > max_size:
+                    print(f"[DEBUG] Mesa {idx} (tamanho {len(table)}) > max_size ({max_size}). Encolhendo...")
+                    self._shrink_table(tables, idx, centroids, embedding_matrix, max_size)
+                    changed = True
+                elif len(table) < min_size:
+                    print(f"[DEBUG] Mesa {idx} (tamanho {len(table)}) < min_size ({min_size}). Tentando preencher...")
+                    if not self._fill_table(tables, idx, centroids, embedding_matrix, min_size):
+                        print(f"[DEBUG] _fill_table falhou para mesa {idx}. Tentando _merge_with_best_table...")
+                        if self._merge_with_best_table(
+                            tables,
+                            idx,
+                            centroids,
+                            embedding_matrix,
+                            max_size,
+                        ):
+                            print(f"[DEBUG] _merge_with_best_table SUCESSO para mesa {idx}.")
+                            changed = True
+                            continue
+                        else:
+                            print(f"[DEBUG] _merge_with_best_table FALHOU para mesa {idx}. Impossível balancear.")
+                            raise ValueError("Não foi possível balancear as mesas respeitando os limites estabelecidos.")
+                    print(f"[DEBUG] _fill_table SUCESSO para mesa {idx}.")
+                    changed = True
             if not changed:
+                print("[DEBUG] Balanceamento estável. Saindo do loop.")
                 break
-
+        print("[DEBUG] Verificação final de balanceamento...")
         if not all(min_size <= len(table) <= max_size for table in tables):
+            print(f"[DEBUG] FALHA NA VERIFICAÇÃO FINAL. Tamanhos: {[len(t) for t in tables]}")
             raise ValueError("Não foi possível balancear as mesas respeitando os limites estabelecidos.")
+        print(f"[DEBUG] SUCESSO. Tamanhos finais: {[len(t) for t in tables]}")
 
-        return tables
-
-    def _find_best_player_to_move(
+    def _shrink_table(
         self,
-        destination_table: int,
         tables: List[List[int]],
-        similarity_matrix: np.ndarray,
+        table_idx: int,
+        centroids: List[np.ndarray],
+        embedding_matrix: np.ndarray,
+        max_size: int,
+    ) -> None:
+        # Adicione este log para ver o início da função
+        print(f"    [shrink_table] Encolhendo mesa {table_idx} (tamanho {len(tables[table_idx])}) para max {max_size}")
+
+        while len(tables[table_idx]) > max_size:
+            # Encontra o jogador menos similar ao centro da mesa atual
+            player_idx = min(
+                tables[table_idx],
+                key=lambda idx: self._cosine_similarity(
+                    embedding_matrix[idx],
+                    centroids[table_idx],
+                ),
+            )
+            
+            # Tenta encontrar a melhor *outra* mesa para este jogador
+            target_idx = self._best_table_for_player(
+                player_idx,
+                current_table=table_idx,
+                tables=tables,
+                centroids=centroids,
+                embedding_matrix=embedding_matrix,
+                max_size=max_size,
+            )
+
+            # --- ESTA É A LÓGICA DE CORREÇÃO ---
+            if target_idx is None:
+                # Se NENHUMA outra mesa puder aceitar o jogador (porque não existem ou estão cheias),
+                # nós DEVEMOS criar uma nova mesa para ele.
+                print(f"    [shrink_table] Nenhuma mesa de destino encontrada para {player_idx}. Criando nova mesa...")
+                
+                # 1. Remover o jogador da mesa atual (que está sendo encolhida)
+                tables[table_idx].remove(player_idx)
+                
+                # 2. Criar uma nova mesa com este jogador
+                tables.append([player_idx])
+                
+                # 3. ATUALIZAR A LISTA DE CENTROIDS (CRÍTICO!)
+                # Recalcular o centroide da mesa antiga
+                centroids[table_idx] = self._compute_centroid(tables[table_idx], embedding_matrix)
+                # Calcular e adicionar o centroide da nova mesa
+                centroids.append(self._compute_centroid(tables[-1], embedding_matrix))
+                
+            else:
+                # Comportamento normal: mover o jogador para a melhor mesa encontrada
+                print(f"    [shrink_table] Movendo jogador {player_idx} da mesa {table_idx} para {target_idx}")
+                tables[table_idx].remove(player_idx)
+                tables[target_idx].append(player_idx)
+                
+                # Recalcular centroides de ambas as mesas
+                centroids[table_idx] = self._compute_centroid(tables[table_idx], embedding_matrix)
+                centroids[target_idx] = self._compute_centroid(tables[target_idx], embedding_matrix)
+            
+            # Log para ver o progresso dentro do while
+            print(f"    [shrink_table] ...tamanhos atuais: {[len(t) for t in tables]}")
+
+    def _fill_table(
+        self,
+        tables: List[List[int]],
+        table_idx: int,
+        centroids: List[np.ndarray],
+        embedding_matrix: np.ndarray,
         min_size: int,
-    ) -> Optional[Tuple[int, int]]:
-        best_gain = None
-        best_candidate: Optional[Tuple[int, int]] = None
-
+    ) -> bool:
+        print(f"  [fill_table] Tentando preencher mesa {table_idx}...")
         for source_idx, table in enumerate(tables):
-            if source_idx == destination_table or len(table) <= min_size:
+            if source_idx == table_idx or len(table) <= min_size:
+                print(f"    [fill_table] Pulando doador {source_idx} (tamanho {len(table)} <= min_size {min_size})")
                 continue
+            player_idx = max(
+                table,
+                key=lambda idx: self._cosine_similarity(
+                    embedding_matrix[idx],
+                    centroids[table_idx],
+                )
+                - self._cosine_similarity(
+                    embedding_matrix[idx],
+                    centroids[source_idx],
+                ),
+            )
+            tables[source_idx].remove(player_idx)
+            tables[table_idx].append(player_idx)
+            centroids[source_idx] = self._compute_centroid(tables[source_idx], embedding_matrix)
+            centroids[table_idx] = self._compute_centroid(tables[table_idx], embedding_matrix)
+            print(f"    [fill_table] Jogador movido da mesa {source_idx} para {table_idx}.")
+            if len(tables[table_idx]) >= min_size:
+                return True
+        print(f"  [fill_table] NÃO FOI POSSÍVEL PREENCHER mesa {table_idx}. Nenhum doador encontrado.")
+        return False
 
-            for player_idx in table:
-                current_similarity = similarity_matrix[player_idx][source_idx]
-                new_similarity = similarity_matrix[player_idx][destination_table]
-                gain = new_similarity - current_similarity
-                if best_gain is None or gain > best_gain:
-                    best_gain = gain
-                    best_candidate = (player_idx, source_idx)
+    def _merge_with_best_table(
+        self,
+        tables: List[List[int]],
+        table_idx: int,
+        centroids: List[np.ndarray],
+        embedding_matrix: np.ndarray,
+        max_size: int,
+    ) -> bool:
+        print(f"  [merge_table] Tentando fundir mesa {table_idx}...")
+        best_idx = None
+        best_similarity = None
+        for idx, table in enumerate(tables):
+            if idx == table_idx:
+                continue
+            potential_size = len(tables[table_idx]) + len(table)
+            if potential_size > max_size:
+                print(f"    [merge_table] Não é possível fundir com mesa {idx}. Tamanho {potential_size} > max_size {max_size}")
+                continue
+            similarity = self._cosine_similarity(centroids[table_idx], centroids[idx])
+            if best_similarity is None or similarity > best_similarity:
+                best_similarity = similarity
+                best_idx = idx
 
-        return best_candidate
+        if best_idx is None:
+            print(f"  [merge_table] NÃO FOI POSSÍVEL FUNDIR mesa {table_idx}. Nenhum alvo de fusão encontrado.")
+            return False
+        print(f"  [merge_table] Fundindo mesa {table_idx} com mesa {best_idx}.")
+        tables[table_idx].extend(tables[best_idx])
+        tables.pop(best_idx)
+        centroids[table_idx] = self._compute_centroid(tables[table_idx], embedding_matrix)
+        centroids.pop(best_idx)
+        return True
 
-    def _sorted_table_preferences(self, similarities: Iterable[float]) -> List[int]:
-        indexed = list(enumerate(similarities))
-        indexed.sort(key=lambda item: item[1], reverse=True)
-        return [idx for idx, _ in indexed]
+    def _best_table_for_player(
+        self,
+        player_idx: int,
+        current_table: int,
+        tables: List[List[int]],
+        centroids: List[np.ndarray],
+        embedding_matrix: np.ndarray,
+        max_size: int,
+    ) -> Optional[int]:
+        best_table = None
+        best_similarity = None
+
+        for idx, table in enumerate(tables):
+            if idx == current_table or len(table) >= max_size:
+                continue
+            similarity = self._cosine_similarity(embedding_matrix[player_idx], centroids[idx])
+            if best_similarity is None or similarity > best_similarity:
+                best_similarity = similarity
+                best_table = idx
+
+        return best_table
+
+    def _compute_centroids(
+        self,
+        tables: List[List[int]],
+        embedding_matrix: np.ndarray,
+    ) -> List[np.ndarray]:
+        return [self._compute_centroid(table, embedding_matrix) for table in tables]
+
+    def _compute_centroid(
+        self,
+        table: List[int],
+        embedding_matrix: np.ndarray,
+    ) -> np.ndarray:
+        if not table:
+            return np.zeros(embedding_matrix.shape[1])
+        centroid = np.mean(embedding_matrix[table], axis=0)
+        norm = np.linalg.norm(centroid)
+        if norm == 0:
+            return centroid
+        return centroid / norm
+
+    def _cosine_similarity(self, vec_a: np.ndarray, vec_b: np.ndarray) -> float:
+        return float(np.dot(vec_a, vec_b) / (np.linalg.norm(vec_a) * np.linalg.norm(vec_b) + 1e-9))
 
     def _generate_player_profile_string(self, jogador: JogadorDTO) -> str:
         parts: List[str] = []
@@ -219,8 +404,6 @@ class GroupService:
             if preferencias.temasFavoritos:
                 temas = ", ".join(preferencias.temasFavoritos)
                 parts.append(f"Prefers themes such as {temas}.")
-            if preferencias.tempoDisponivel:
-                parts.append(f"Available for sessions up to {preferencias.tempoDisponivel} minutes.")
 
         return " ".join(parts)
 
@@ -240,27 +423,18 @@ class GroupService:
             if jogador.preferencias and jogador.preferencias.temasFavoritos
             for tema in jogador.preferencias.temasFavoritos
         ]
-        tempos = [
-            jogador.preferencias.tempoDisponivel
-            for jogador in jogadores
-            if jogador.preferencias and jogador.preferencias.tempoDisponivel
-        ]
 
         mecanicas_predominantes = self._top_n(mecanicas, limit=3)
         temas_predominantes = self._top_n(temas, limit=3)
-        tempo_medio = int(mean(tempos)) if tempos else None
-
         return PerfilMesaDTO(
             nivelPredominante=nivel_predominante,
             mecanicasPredominantes=mecanicas_predominantes,
             temasPredominantes=temas_predominantes,
-            tempoMedioDisponivel=tempo_medio,
         )
 
     def _generate_table_profile_string(
         self,
         perfil: PerfilMesaDTO,
-        limite_duracao: Optional[int],
     ) -> str:
         parts = [
             f"A group of {perfil.nivelPredominante} board game players.",
@@ -269,29 +443,14 @@ class GroupService:
             parts.append(f"They enjoy mechanics such as {', '.join(perfil.mecanicasPredominantes)}.")
         if perfil.temasPredominantes:
             parts.append(f"They prefer themes like {', '.join(perfil.temasPredominantes)}.")
-        if perfil.tempoMedioDisponivel:
-            parts.append(f"The average available play time is {perfil.tempoMedioDisponivel} minutes.")
-        if limite_duracao:
-            parts.append(f"Sessions should not exceed {limite_duracao} minutes.")
 
         return " ".join(parts)
 
     def _map_recommendations_to_dto(
         self,
         recommendations: Sequence[dict],
-        limite_duracao: Optional[int],
     ) -> List[JogoRecomendadoDTO]:
-        filtered = recommendations
-        if limite_duracao is not None:
-            filtered = [
-                reco
-                for reco in recommendations
-                if reco.get("vlTempoJogo") is None or reco.get("vlTempoJogo") <= limite_duracao
-            ]
-            if not filtered:
-                filtered = recommendations
-
-        top_results = filtered[:DEFAULT_TOP_K_RECOMMENDATIONS]
+        top_results = recommendations[:DEFAULT_TOP_K_RECOMMENDATIONS]
         jogos: List[JogoRecomendadoDTO] = []
         for reco in top_results:
             jogos.append(

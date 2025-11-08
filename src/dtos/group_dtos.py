@@ -9,7 +9,6 @@ class PreferenciasDTO(BaseModel):
     """
     mecanicasFavoritas: List[str]
     temasFavoritos: List[str]
-    tempoDisponivel: Optional[int]  # in minutes
 
 
 class JogadorDTO(BaseModel):
@@ -28,10 +27,10 @@ class RestricoesDTO(BaseModel):
     Constraints defined by the organizer when creating groups.
     They control the minimum/maximum table size and other rules.
     """
-    tamanhoMinimoMesa: int
-    tamanhoMaximoMesa: int
-    duracaoMaxima: Optional[int]  # in minutes
-
+    tamanhoMinimoMesa: int = 1
+    tamanhoMaximoMesa: Optional[int] = 6
+    dbscanEps: Optional[float] = 0.35
+    dbscanMinSamples: Optional[int] = 2
 
 class CriarGruposRequest(BaseModel):
     """
@@ -39,8 +38,7 @@ class CriarGruposRequest(BaseModel):
     The organizer specifies the event, number of tables, constraints,
     and the list of players who registered.
     """
-    eventoId: int
-    quantidadeMesas: int
+    quantidadeMesas: Optional[int] = 8
     restricoes: Optional[RestricoesDTO]
     jogadores: List[JogadorDTO]
 
@@ -65,7 +63,6 @@ class PerfilMesaDTO(BaseModel):
     nivelPredominante: str
     mecanicasPredominantes: List[str]
     temasPredominantes: List[str]
-    tempoMedioDisponivel: Optional[int]
 
 
 class MesaDTO(BaseModel):
@@ -83,7 +80,6 @@ class MesaDTO(BaseModel):
 class CriarGruposResponse(BaseModel):
     """
     Output DTO for the group creation process.
-    The response includes the event ID and the list of generated tables.
+    The response includes the list of generated tables.
     """
-    eventoId: int
     mesas: List[MesaDTO]

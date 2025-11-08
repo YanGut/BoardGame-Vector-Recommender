@@ -43,14 +43,6 @@ def create_groups():
         schema:
           id: CriarGruposRequest
           properties:
-            eventoId:
-              type: integer
-              description: The ID of the event.
-              example: 1
-            quantidadeMesas:
-              type: integer
-              description: The number of tables/groups to create.
-              example: 2
             restricoes:
               type: object
               description: Optional constraints for group creation.
@@ -61,9 +53,15 @@ def create_groups():
                 tamanhoMaximoMesa:
                   type: integer
                   example: 5
-                duracaoMaxima:
+                dbscanEps:
+                  type: number
+                  format: float
+                  description: Cosine-distance threshold for DBSCAN clustering.
+                  example: 0.35
+                dbscanMinSamples:
                   type: integer
-                  example: 180
+                  description: Minimum players per cluster for DBSCAN.
+                  example: 2
             jogadores:
               type: array
               items:
@@ -91,18 +89,12 @@ def create_groups():
                         items:
                           type: string
                         example: ["fantasia"]
-                      tempoDisponivel:
-                        type: integer
-                        example: 120
     responses:
       200:
         description: Successfully created groups.
         schema:
           id: CriarGruposResponse
           properties:
-            eventoId:
-              type: integer
-              example: 1
             mesas:
               type: array
               items:
@@ -138,9 +130,6 @@ def create_groups():
                               items:
                                 type: string
                               example: ["fantasia"]
-                            tempoDisponivel:
-                              type: integer
-                              example: 120
                   perfilMesa:
                     type: object
                     properties:
@@ -157,9 +146,6 @@ def create_groups():
                         items:
                           type: string
                         example: ["fantasia"]
-                      tempoMedioDisponivel:
-                        type: integer
-                        example: 120
                   jogosRecomendados:
                     type: array
                     items:
