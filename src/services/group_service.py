@@ -117,6 +117,8 @@ class GroupService:
         Stateless, incremental player assignment.
         Decides whether to add the new player to an existing table or create a new one,
         then returns the full, updated state (including fresh recommendations for every table).
+        
+        Refactored for performance to use only one batch call to the embedding service.
         """
         novo_jogador: JogadorDTO = request_data.novoJogador
         mesas_existentes: List[MesaExistenteDTO] = list(request_data.mesasExistentes or [])
@@ -125,12 +127,44 @@ class GroupService:
         max_size = restricoes.tamanhoMaximoMesa if restricoes.tamanhoMaximoMesa else 6
         threshold = restricoes.similarityThreshold if restricoes.similarityThreshold is not None else 0.5
 
-        # Compute normalized embedding for new player
-        novo_profile_text = self._generate_player_profile_string(novo_jogador)
-        novo_embedding = self.embedding_service.get_embeddings([novo_profile_text])
-        if not novo_embedding or not novo_embedding[0]:
-            raise ValueError("Falha ao gerar embedding para o novo jogador.")
-        novo_vec = normalize(np.array(novo_embedding))[0]
+        # --- REFACTOR START: Batch Embedding ---
+
+        # 1. Collect all unique players (from tables + the new one)
+        # Using a dict ensures uniqueness by idUsuario
+        all_players_map: dict[int, JogadorDTO] = {}
+        for mesa in mesas_existentes:
+            for j in mesa.jogadores:
+                all_players_map[j.idUsuario] = j
+        all_players_map[novo_jogador.idUsuario] = novo_jogador
+
+        # 2. Create a list of text profiles to be embedded
+        # We need to keep track of which id maps to which profile
+        player_ids_in_order = list(all_players_map.keys())
+        if not player_ids_in_order:
+            # Handle edge case where no players are provided at all
+            return CriarGruposResponse(mesas=[])
+
+        profiles_to_embed = [self._generate_player_profile_string(all_players_map[uid]) for uid in player_ids_in_order]
+
+        # 3. Make the SINGLE call to the embedding service
+        all_embeddings_list = self.embedding_service.get_embeddings(profiles_to_embed)
+        if not all_embeddings_list or len(all_embeddings_list) != len(player_ids_in_order):
+            raise ValueError("Falha ao gerar embeddings para os jogadores.")
+
+        # 4. Normalize all embeddings
+        normalized_embeddings = normalize(np.array(all_embeddings_list))
+
+        # 5. Create the final lookup map: idUsuario -> normalized_vector
+        embeddings_map: dict[int, np.ndarray] = {
+            uid: vec for uid, vec in zip(player_ids_in_order, normalized_embeddings)
+        }
+
+        # 6. Get the new player's vector from the map
+        novo_vec = embeddings_map.get(novo_jogador.idUsuario)
+        if novo_vec is None:
+            raise ValueError("Falha ao encontrar embedding para o novo jogador no mapa.")
+        
+        # --- REFACTOR END ---
 
         # Find best-fit existing table by centroid cosine similarity
         best_idx: Optional[int] = None
@@ -144,12 +178,24 @@ class GroupService:
             if len(jogadores_mesa) >= max_size:
                 continue
 
-            textos_mesa = [self._generate_player_profile_string(j) for j in jogadores_mesa]
-            mesa_embeddings = self.embedding_service.get_embeddings(textos_mesa)
-            if not mesa_embeddings:
+            # --- REFACTOR START (INSIDE LOOP) ---
+            
+            # Get pre-computed embeddings from the map
+            try:
+                mesa_embeddings_list = [embeddings_map[j.idUsuario] for j in jogadores_mesa]
+            except KeyError:
+                # This should not happen if all_players_map logic is correct
+                print(f"Warning: Skipping table {mesa.mesaId}, missing embedding for a player.")
                 continue
-            mesa_matrix = normalize(np.array(mesa_embeddings))
+
+            if not mesa_embeddings_list:
+                continue
+
+            # We pass the local matrix and a range(len) as indices to reuse the helper
+            mesa_matrix = np.array(mesa_embeddings_list) # Already normalized
             centroid = self._compute_centroid(list(range(mesa_matrix.shape[0])), mesa_matrix)
+
+            # --- REFACTOR END (INSIDE LOOP) ---
 
             similarity = self._cosine_similarity(novo_vec, centroid)
 
@@ -177,6 +223,11 @@ class GroupService:
         mesas_response: List[MesaDTO] = []
         for mesa_ex in mesas_existentes:
             mesa_jogadores = list(mesa_ex.jogadores or [])
+            
+            # Skip tables that might have become empty (if min_size=0 was allowed)
+            if not mesa_jogadores:
+                continue
+
             perfil = self._create_table_profile(mesa_jogadores)
             query = self._generate_table_profile_string(perfil)
 
