@@ -11,7 +11,9 @@ from src.dtos.group_dtos import (
     JogoRecomendadoDTO,
     PerfilMesaDTO,
     MesaDTO,
-    CriarGruposResponse
+    CriarGruposResponse,
+    MesaExistenteDTO,
+    AssignPlayerRequest,
 )
 from src.dtos.recommendation_dtos import HybridRecommendationRequest
 
@@ -20,17 +22,22 @@ def create_app():
   
   CORS(app)
 
-  # Generate OpenAPI schemas from Pydantic models
+  # Generate OpenAPI schemas from Pydantic models with Swagger-friendly refs
+  def _schema(model):
+      return model.model_json_schema(ref_template="#/definitions/{model}")
+
   pydantic_schemas = {
-      "PreferenciasDTO": PreferenciasDTO.model_json_schema(),
-      "JogadorDTO": JogadorDTO.model_json_schema(),
-      "RestricoesDTO": RestricoesDTO.model_json_schema(),
-      "CriarGruposRequest": CriarGruposRequest.model_json_schema(),
-      "JogoRecomendadoDTO": JogoRecomendadoDTO.model_json_schema(),
-      "PerfilMesaDTO": PerfilMesaDTO.model_json_schema(),
-      "MesaDTO": MesaDTO.model_json_schema(),
-      "CriarGruposResponse": CriarGruposResponse.model_json_schema(),
-      "HybridRecommendationRequest": HybridRecommendationRequest.model_json_schema(),
+      "PreferenciasDTO": _schema(PreferenciasDTO),
+      "JogadorDTO": _schema(JogadorDTO),
+      "RestricoesDTO": _schema(RestricoesDTO),
+      "CriarGruposRequest": _schema(CriarGruposRequest),
+      "JogoRecomendadoDTO": _schema(JogoRecomendadoDTO),
+      "PerfilMesaDTO": _schema(PerfilMesaDTO),
+      "MesaDTO": _schema(MesaDTO),
+      "CriarGruposResponse": _schema(CriarGruposResponse),
+      "MesaExistenteDTO": _schema(MesaExistenteDTO),
+      "AssignPlayerRequest": _schema(AssignPlayerRequest),
+      "HybridRecommendationRequest": _schema(HybridRecommendationRequest),
   }
 
   # Flasgger configuration

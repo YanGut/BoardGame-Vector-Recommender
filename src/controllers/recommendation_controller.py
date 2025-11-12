@@ -2,7 +2,11 @@ from flask import Blueprint, request, jsonify
 from pydantic import ValidationError
 from src.services.recommendation_service import recommendation_service_instance
 from src.services.group_service import group_service_instance
-from src.dtos.group_dtos import CriarGruposRequest, CriarGruposResponse
+from src.dtos.group_dtos import (
+    CriarGruposRequest,
+    CriarGruposResponse,
+    AssignPlayerRequest,
+)
 from src.dtos.recommendation_dtos import HybridRecommendationRequest
 
 reco_bp = Blueprint('recommendations', __name__)
@@ -170,6 +174,37 @@ def create_groups():
     try:
         data = CriarGruposRequest.parse_raw(request.data)
         response = group_service_instance.create_groups(data)
+        return jsonify(response.dict())
+    except ValidationError as e:
+        return jsonify({"error": e.errors()}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@reco_bp.route('/groups/assign-player', methods=['POST'])
+def assign_player_route():
+    """
+    Assign a new player to an existing table or create a new table (stateless).
+    ---
+    tags:
+      - Groups
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          id: AssignPlayerRequest
+        description: The new player, the current list of tables, and assignment constraints.
+    responses:
+      200:
+        description: Full, updated state of all tables.
+        schema:
+          id: CriarGruposResponse
+      400:
+        description: Invalid request data.
+    """
+    try:
+        data = AssignPlayerRequest.parse_raw(request.data)
+        response = group_service_instance.assign_player(data)
         return jsonify(response.dict())
     except ValidationError as e:
         return jsonify({"error": e.errors()}), 400

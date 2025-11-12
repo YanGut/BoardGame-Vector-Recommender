@@ -15,6 +15,9 @@ from src.dtos.group_dtos import (
     JogoRecomendadoDTO,
     MesaDTO,
     PerfilMesaDTO,
+    AssignPlayerRequest,
+    MesaExistenteDTO,
+    RestricoesDTO,
 )
 from src.services.embedding_service import EmbeddingService
 from src.services.recommendation_service import recommendation_service_instance
@@ -108,6 +111,95 @@ class GroupService:
         return CriarGruposResponse(
             mesas=mesas_response,
         )
+
+    def assign_player(self, request_data: AssignPlayerRequest) -> CriarGruposResponse:
+        """
+        Stateless, incremental player assignment.
+        Decides whether to add the new player to an existing table or create a new one,
+        then returns the full, updated state (including fresh recommendations for every table).
+        """
+        novo_jogador: JogadorDTO = request_data.novoJogador
+        mesas_existentes: List[MesaExistenteDTO] = list(request_data.mesasExistentes or [])
+        restricoes = request_data.restricoes or RestricoesDTO()
+
+        max_size = restricoes.tamanhoMaximoMesa if restricoes.tamanhoMaximoMesa else 6
+        threshold = restricoes.similarityThreshold if restricoes.similarityThreshold is not None else 0.5
+
+        # Compute normalized embedding for new player
+        novo_profile_text = self._generate_player_profile_string(novo_jogador)
+        novo_embedding = self.embedding_service.get_embeddings([novo_profile_text])
+        if not novo_embedding or not novo_embedding[0]:
+            raise ValueError("Falha ao gerar embedding para o novo jogador.")
+        novo_vec = normalize(np.array(novo_embedding))[0]
+
+        # Find best-fit existing table by centroid cosine similarity
+        best_idx: Optional[int] = None
+        best_similarity: Optional[float] = None
+
+        for idx, mesa in enumerate(mesas_existentes):
+            jogadores_mesa = list(mesa.jogadores or [])
+            if len(jogadores_mesa) == 0:
+                # Skip empty tables in selection; they offer no signal
+                continue
+            if len(jogadores_mesa) >= max_size:
+                continue
+
+            textos_mesa = [self._generate_player_profile_string(j) for j in jogadores_mesa]
+            mesa_embeddings = self.embedding_service.get_embeddings(textos_mesa)
+            if not mesa_embeddings:
+                continue
+            mesa_matrix = normalize(np.array(mesa_embeddings))
+            centroid = self._compute_centroid(list(range(mesa_matrix.shape[0])), mesa_matrix)
+
+            similarity = self._cosine_similarity(novo_vec, centroid)
+
+            if best_similarity is None or similarity > best_similarity:
+                best_similarity = similarity
+                best_idx = idx
+
+        best_fit_found = best_idx is not None and (best_similarity or 0.0) >= threshold
+
+        if best_fit_found:
+            # Add to the best existing table in-memory
+            mesas_existentes[best_idx].jogadores.append(novo_jogador)
+        else:
+            # Create a new temporary table and append it
+            next_id = 1
+            if mesas_existentes:
+                try:
+                    next_id = max(m.mesaId for m in mesas_existentes) + 1
+                except ValueError:
+                    next_id = 1
+            nova_mesa = MesaExistenteDTO(mesaId=next_id, jogadores=[novo_jogador])
+            mesas_existentes.append(nova_mesa)
+
+        # Build full response with updated recommendations for all tables
+        mesas_response: List[MesaDTO] = []
+        for mesa_ex in mesas_existentes:
+            mesa_jogadores = list(mesa_ex.jogadores or [])
+            perfil = self._create_table_profile(mesa_jogadores)
+            query = self._generate_table_profile_string(perfil)
+
+            recomendacoes = self.recommendation_service.recommend_games_hybrid(
+                query_text=query,
+                top_k=DEFAULT_TOP_K_RECOMMENDATIONS,
+                candidate_pool_size=100,
+                semantic_weight=0.6,
+                popularity_weight=0.4,
+            )
+
+            jogos_recomendados = self._map_recommendations_to_dto(recomendacoes)
+
+            mesas_response.append(
+                MesaDTO(
+                    mesaId=mesa_ex.mesaId,
+                    jogadores=mesa_jogadores,
+                    perfilMesa=perfil,
+                    jogosRecomendados=jogos_recomendados,
+                )
+            )
+
+        return CriarGruposResponse(mesas=mesas_response)
 
     def _build_tables_from_labels(
         self,

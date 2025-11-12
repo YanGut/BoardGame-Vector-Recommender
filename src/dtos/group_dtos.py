@@ -31,6 +31,8 @@ class RestricoesDTO(BaseModel):
     tamanhoMaximoMesa: Optional[int] = 6
     dbscanEps: Optional[float] = 0.35
     dbscanMinSamples: Optional[int] = 2
+    # Minimum cosine similarity to join an existing table in incremental assignment
+    similarityThreshold: Optional[float] = 0.5
 
 class CriarGruposRequest(BaseModel):
     """
@@ -83,3 +85,23 @@ class CriarGruposResponse(BaseModel):
     The response includes the list of generated tables.
     """
     mesas: List[MesaDTO]
+
+
+class MesaExistenteDTO(BaseModel):
+    """
+    Represents an existing table sent by the client during incremental assignment.
+    Must not include recommendations; those are computed server-side.
+    """
+    mesaId: int
+    jogadores: List[JogadorDTO]
+
+
+class AssignPlayerRequest(BaseModel):
+    """
+    Request DTO for the stateless, incremental player assignment endpoint.
+    The service decides to add the player to an existing table or create a new one,
+    and returns the full, updated state using CriarGruposResponse.
+    """
+    novoJogador: JogadorDTO
+    mesasExistentes: List[MesaExistenteDTO]
+    restricoes: Optional[RestricoesDTO] = None
