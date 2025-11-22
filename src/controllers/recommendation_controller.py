@@ -7,7 +7,11 @@ from src.dtos.group_dtos import (
     CriarGruposResponse,
     AssignPlayerRequest,
 )
-from src.dtos.recommendation_dtos import HybridRecommendationRequest
+from src.dtos.recommendation_dtos import (
+    HybridRecommendationRequest,
+    PaginatedHybridRecommendationRequest,
+    PaginatedRecommendationRequest,
+)
 
 reco_bp = Blueprint('recommendations', __name__)
 
@@ -322,6 +326,77 @@ def recommend_games_hybrid_route():
             "query": req_data.query,
             "recommendations": recommendations
         })
+    except ValidationError as e:
+        return jsonify({"error": e.errors()}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@reco_bp.route('/recommend/hybrid/paginated', methods=['POST'])
+def recommend_games_hybrid_paginated_route():
+    """
+    Get paginated hybrid board game recommendations.
+    ---
+    tags:
+      - Recommendations
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          id: PaginatedHybridRecommendationRequest
+    responses:
+      200:
+        description: A paginated list of re-ranked recommended games.
+      400:
+        description: Invalid request data.
+    """
+    try:
+        req_data = PaginatedHybridRecommendationRequest.parse_raw(request.data)
+        
+        result = recommendation_service_instance.recommend_games_hybrid_paginated(
+            query_text=req_data.query,
+            page=req_data.page,
+            per_page=req_data.per_page,
+            candidate_pool_size=req_data.candidate_pool_size,
+            semantic_weight=req_data.semantic_weight,
+            popularity_weight=req_data.popularity_weight
+        )
+        
+        return jsonify(result)
+    except ValidationError as e:
+        return jsonify({"error": e.errors()}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@reco_bp.route('/recommend/paginated', methods=['POST'])
+def recommend_games_paginated_route():
+    """
+    Get paginated board game recommendations.
+    ---
+    tags:
+      - Recommendations
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          id: PaginatedRecommendationRequest
+    responses:
+      200:
+        description: A paginated list of recommended games.
+      400:
+        description: Invalid request data.
+    """
+    try:
+        req_data = PaginatedRecommendationRequest.parse_raw(request.data)
+        
+        result = recommendation_service_instance.recommend_games_paginated(
+            query_text=req_data.query,
+            page=req_data.page,
+            per_page=req_data.per_page
+        )
+        
+        return jsonify(result)
     except ValidationError as e:
         return jsonify({"error": e.errors()}), 400
     except Exception as e:

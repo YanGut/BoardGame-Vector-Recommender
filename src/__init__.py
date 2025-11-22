@@ -15,7 +15,11 @@ from src.dtos.group_dtos import (
     MesaExistenteDTO,
     AssignPlayerRequest,
 )
-from src.dtos.recommendation_dtos import HybridRecommendationRequest
+from src.dtos.recommendation_dtos import (
+    HybridRecommendationRequest,
+    PaginatedHybridRecommendationRequest,
+    PaginatedRecommendationRequest,
+)
 
 def create_app():
   app = Flask(__name__)
@@ -38,6 +42,8 @@ def create_app():
       "MesaExistenteDTO": _schema(MesaExistenteDTO),
       "AssignPlayerRequest": _schema(AssignPlayerRequest),
       "HybridRecommendationRequest": _schema(HybridRecommendationRequest),
+      "PaginatedHybridRecommendationRequest": _schema(PaginatedHybridRecommendationRequest),
+      "PaginatedRecommendationRequest": _schema(PaginatedRecommendationRequest),
   }
 
   # Flasgger configuration

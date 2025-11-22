@@ -89,6 +89,87 @@ class RecommendationService:
             print(f"Erro ao executar pipeline de recomendação híbrida: {e}")
             return []
 
+    def recommend_games_hybrid_paginated(
+        self,
+        query_text: str,
+        page: int,
+        per_page: int,
+        candidate_pool_size: int,
+        semantic_weight: float,
+        popularity_weight: float,
+    ) -> dict:
+        """
+        Performs a hybrid search and provides paginated results from the re-ranked list.
+        """
+        try:
+            # 1. Retrieve the full candidate pool
+            documents = run_text_retrieval(self.query_pipeline, query_text, candidate_pool_size)
+
+            if not documents:
+                return {"page": page, "per_page": per_page, "total": 0, "games": [], "query": query_text}
+
+            # 2. Re-rank the entire pool (without slicing by top_k yet)
+            # We pass a high top_k to ensure we get the full ranked list back
+            ranked_results = hybrid_rank(
+                documents=documents,
+                semantic_weight=semantic_weight,
+                popularity_weight=popularity_weight,
+                top_k=len(documents),
+            )
+
+            # 3. Paginate the re-ranked list in memory
+            total_candidates = len(ranked_results)
+            offset = (page - 1) * per_page
+            paginated_ranked_list = ranked_results[offset : offset + per_page]
+
+            # 4. Map the final page of results
+            final_recommendations = [
+                document_to_hybrid_game_dict(doc, final_score=score)
+                for doc, score in paginated_ranked_list
+            ]
+
+            return {
+                "page": page,
+                "per_page": per_page,
+                "total": total_candidates,
+                "games": final_recommendations,
+                "query": query_text,
+            }
+        except Exception as e:
+            print(f"Error executing hybrid paginated recommendation pipeline: {e}")
+            return {"page": page, "per_page": per_page, "total": 0, "games": [], "query": query_text}
+
+    def recommend_games_paginated(self, query_text: str, page: int, per_page: int) -> dict:
+        """
+        Searches for games based on a text query with pagination.
+        """
+        try:
+            # 1. Embed the query text
+            # The pipeline's text_embedder component can be run standalone
+            text_embedder = self.query_pipeline.get_component("text_embedder")
+            embedding_result = text_embedder.run(text=query_text)
+            query_embedding = embedding_result["embedding"]
+
+            # 2. Call the repository for paginated results
+            documents, norm_page, norm_per_page = self.repository.find_by_embedding_paginated(
+                query_embedding=query_embedding,
+                page=page,
+                per_page=per_page,
+            )
+
+            # 3. Map results and return
+            games_list = [document_to_game_dict(doc) for doc in documents]
+            
+            return {
+                "page": norm_page,
+                "per_page": norm_per_page,
+                "games": games_list,
+                "query": query_text,
+            }
+        except Exception as e:
+            print(f"Error executing paginated recommendation pipeline: {e}")
+            return {"page": page, "per_page": per_page, "games": [], "query": query_text}
+
     def get_game_by_mysql_id(self, game_mysql_id: int) -> dict | None:
         """Busca um jogo pelo seu ID original do MySQL."""
         try:

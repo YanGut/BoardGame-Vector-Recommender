@@ -27,6 +27,45 @@ class GameRepository:
             return documents[0]
         return None
 
+    def find_by_embedding_paginated(
+        self,
+        query_embedding: List[float],
+        page: int,
+        per_page: int,
+    ) -> Tuple[List[Document], int, int]:
+        page, per_page = normalize_page_params(page, per_page)
+        # Fetch a larger pool of candidates to paginate in memory
+        candidate_pool_size = page * per_page
+
+        collection = getattr(self._document_store, "_collection", None)
+        if collection is None:
+            return [], page, per_page
+
+        # ChromaDB's query returns more than just documents, so we handle the raw response
+        query_result = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=candidate_pool_size, # Fetch enough for all pages up to the current one
+            include=["metadatas", "documents", "distances"],
+        )
+
+        ids = query_result.get("ids", [[]])[0]
+        metadatas = query_result.get("metadatas", [[]])[0]
+        documents_content = query_result.get("documents", [[]])[0]
+        distances = query_result.get("distances", [[]])[0]
+
+        reconstructed_docs: List[Document] = []
+        for doc_id, meta, content, dist in zip(ids, metadatas, documents_content, distances):
+            # The score is the similarity, which is 1 - distance
+            score = 1 - dist
+            doc = Document(id=doc_id, content=content, meta=meta, score=score)
+            reconstructed_docs.append(doc)
+        
+        # Now, perform pagination on the retrieved list
+        offset = (page - 1) * per_page
+        paginated_docs = reconstructed_docs[offset : offset + per_page]
+
+        return paginated_docs, page, per_page
+
     def list_paginated(
         self, page: int, per_page: int
     ) -> Tuple[List[Document], int, int, int]:
