@@ -11,7 +11,9 @@ from src.dtos.recommendation_dtos import (
     HybridRecommendationRequest,
     PaginatedHybridRecommendationRequest,
     PaginatedRecommendationRequest,
+    RecommendFromListRequest,
 )
+
 
 reco_bp = Blueprint('recommendations', __name__)
 
@@ -402,7 +404,40 @@ def recommend_games_paginated_route():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@reco_bp.route('/games', methods=['GET'])
+@reco_bp.route("/recommend/from-list", methods=["POST"])
+def recommend_from_list_route():
+    """
+    Sort a specific list of games by relevance to a query.
+    ---
+    tags:
+      - Recommendations
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          id: RecommendFromListRequest
+    responses:
+      200:
+        description: A list of the provided games, sorted by relevance.
+      400:
+        description: Invalid request data.
+    """
+    try:
+        req_data = RecommendFromListRequest.parse_raw(request.data)
+
+        sorted_games = recommendation_service_instance.recommend_from_list(
+            query_text=req_data.query, game_ids=req_data.game_ids
+        )
+
+        return jsonify({"query": req_data.query, "ranked_games": sorted_games})
+    except ValidationError as e:
+        return jsonify({"error": e.errors()}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@reco_bp.route("/games", methods=["GET"])
 def list_games_route():
     """
     List all games with pagination
@@ -437,9 +472,9 @@ def list_games_route():
               items:
                 type: object
     """
-    page = int(request.args.get('page', 1))
-    per_page = int(request.args.get('per_page', 20))
-    
+    page = int(request.args.get("page", 1))
+    per_page = int(request.args.get("per_page", 20))
+
     result = recommendation_service_instance.list_all_games(page, per_page)
     return jsonify(result)
 

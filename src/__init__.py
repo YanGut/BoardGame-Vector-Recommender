@@ -19,6 +19,7 @@ from src.dtos.recommendation_dtos import (
     HybridRecommendationRequest,
     PaginatedHybridRecommendationRequest,
     PaginatedRecommendationRequest,
+    RecommendFromListRequest,
 )
 
 def create_app():
@@ -44,6 +45,7 @@ def create_app():
       "HybridRecommendationRequest": _schema(HybridRecommendationRequest),
       "PaginatedHybridRecommendationRequest": _schema(PaginatedHybridRecommendationRequest),
       "PaginatedRecommendationRequest": _schema(PaginatedRecommendationRequest),
+      "RecommendFromListRequest": _schema(RecommendFromListRequest),
   }
 
   # Flasgger configuration

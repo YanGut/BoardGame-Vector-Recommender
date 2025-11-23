@@ -27,6 +27,32 @@ class GameRepository:
             return documents[0]
         return None
 
+    def get_many_by_mysql_ids(self, mysql_ids: List[int]) -> List[Document]:
+        """
+        Fetches a specific list of documents and their embeddings by their MySQL IDs.
+        """
+        collection = getattr(self._document_store, "_collection", None)
+        if not collection or not mysql_ids:
+            return []
+
+        # Query ChromaDB for the specific documents and their embeddings
+        results = collection.get(
+            where={"mysql_id": {"$in": mysql_ids}},
+            include=["metadatas", "documents", "embeddings"],
+        )
+
+        reconstructed_docs: List[Document] = []
+        for i, doc_id in enumerate(results.get("ids", [])):
+            doc = Document(
+                id=doc_id,
+                content=results["documents"][i],
+                meta=results["metadatas"][i],
+                embedding=results["embeddings"][i],
+            )
+            reconstructed_docs.append(doc)
+
+        return reconstructed_docs
+
     def find_by_embedding_paginated(
         self,
         query_embedding: List[float],

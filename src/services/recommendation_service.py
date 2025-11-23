@@ -1,4 +1,6 @@
 import os
+from typing import List
+import numpy as np
 
 from haystack import Pipeline, Document
 from haystack_integrations.components.embedders.ollama import OllamaDocumentEmbedder
@@ -15,7 +17,19 @@ from src.services.recommendation import (
     run_text_retrieval,
 )
 
-class RecommendationService:    
+
+def document_to_scored_game_dict(doc: Document, score: float) -> dict:
+    """Maps a Document and a score to a dictionary for the API response."""
+    return {
+        "id": doc.meta.get("id"),
+        "mysql_id": doc.meta.get("mysql_id"),
+        "name": doc.meta.get("name"),
+        "thumbnail": doc.meta.get("thumbnail"),
+        "relevance_score": score,
+    }
+
+
+class RecommendationService:
     def __init__(self) -> None:
         self.document_store: ChromaDocumentStore = get_chroma_store()
         self.repository: GameRepository = GameRepository(self.document_store)
@@ -35,7 +49,7 @@ class RecommendationService:
         try:
             documents = run_text_retrieval(self.query_pipeline, query_text, top_k)
             recommendations: list[dict] = []
-            
+
             print(f"Retrieved {len(documents)} documents for query '{query_text}'.")
 
             for doc in documents:
@@ -52,7 +66,7 @@ class RecommendationService:
         top_k: int = 10,
         candidate_pool_size: int = 100,
         semantic_weight: float = 0.7,
-        popularity_weight: float = 0.3
+        popularity_weight: float = 0.3,
     ) -> list[dict]:
         """
         Busca por jogos usando uma abordagem híbrida de re-ranking.
@@ -61,15 +75,19 @@ class RecommendationService:
         try:
             print(f"\n[Hybrid Search] Iniciando busca para query: '{query_text}'")
             # 1. Aumentar o pool de candidatos
-            documents = run_text_retrieval(self.query_pipeline, query_text, candidate_pool_size)
+            documents = run_text_retrieval(
+                self.query_pipeline, query_text, candidate_pool_size
+            )
 
             if not documents:
                 print("[Hybrid Search] Nenhum candidato inicial encontrado.")
                 return []
 
             initial_candidates = documents
-            print(f"[Hybrid Search] {len(initial_candidates)} candidatos iniciais recuperados.")
-            
+            print(
+                f"[Hybrid Search] {len(initial_candidates)} candidatos iniciais recuperados."
+            )
+
             ranked_results = hybrid_rank(
                 documents=initial_candidates,
                 semantic_weight=semantic_weight,
@@ -82,7 +100,9 @@ class RecommendationService:
                 for doc, score in ranked_results
             ]
 
-            print(f"[Hybrid Search] Retornando {len(final_recommendations)} recomendações finais.")
+            print(
+                f"[Hybrid Search] Retornando {len(final_recommendations)} recomendações finais."
+            )
             return final_recommendations
 
         except Exception as e:
@@ -103,10 +123,18 @@ class RecommendationService:
         """
         try:
             # 1. Retrieve the full candidate pool
-            documents = run_text_retrieval(self.query_pipeline, query_text, candidate_pool_size)
+            documents = run_text_retrieval(
+                self.query_pipeline, query_text, candidate_pool_size
+            )
 
             if not documents:
-                return {"page": page, "per_page": per_page, "total": 0, "games": [], "query": query_text}
+                return {
+                    "page": page,
+                    "per_page": per_page,
+                    "total": 0,
+                    "games": [],
+                    "query": query_text,
+                }
 
             # 2. Re-rank the entire pool (without slicing by top_k yet)
             # We pass a high top_k to ensure we get the full ranked list back
@@ -137,9 +165,17 @@ class RecommendationService:
             }
         except Exception as e:
             print(f"Error executing hybrid paginated recommendation pipeline: {e}")
-            return {"page": page, "per_page": per_page, "total": 0, "games": [], "query": query_text}
+            return {
+                "page": page,
+                "per_page": per_page,
+                "total": 0,
+                "games": [],
+                "query": query_text,
+            }
 
-    def recommend_games_paginated(self, query_text: str, page: int, per_page: int) -> dict:
+    def recommend_games_paginated(
+        self, query_text: str, page: int, per_page: int
+    ) -> dict:
         """
         Searches for games based on a text query with pagination.
         """
@@ -151,7 +187,11 @@ class RecommendationService:
             query_embedding = embedding_result["embedding"]
 
             # 2. Call the repository for paginated results
-            documents, norm_page, norm_per_page = self.repository.find_by_embedding_paginated(
+            (
+                documents,
+                norm_page,
+                norm_per_page,
+            ) = self.repository.find_by_embedding_paginated(
                 query_embedding=query_embedding,
                 page=page,
                 per_page=per_page,
@@ -159,7 +199,7 @@ class RecommendationService:
 
             # 3. Map results and return
             games_list = [document_to_game_dict(doc) for doc in documents]
-            
+
             return {
                 "page": norm_page,
                 "per_page": norm_per_page,
@@ -168,7 +208,51 @@ class RecommendationService:
             }
         except Exception as e:
             print(f"Error executing paginated recommendation pipeline: {e}")
-            return {"page": page, "per_page": per_page, "games": [], "query": query_text}
+            return {
+                "page": page,
+                "per_page": per_page,
+                "games": [],
+                "query": query_text,
+            }
+
+    def recommend_from_list(
+        self, query_text: str, game_ids: List[int]
+    ) -> List[dict]:
+        """
+        Ranks a specific list of games by semantic relevance to a query.
+        """
+        # 1. Fetch the specified documents from the repository
+        documents = self.repository.get_many_by_mysql_ids(game_ids)
+        if not documents:
+            return []
+
+        # 2. Embed the query text
+        text_embedder = self.query_pipeline.get_component("text_embedder")
+        embedding_result = text_embedder.run(text=query_text)
+        query_embedding = np.array(embedding_result["embedding"])
+
+        # 3. Calculate cosine similarity in-memory
+        scored_docs = []
+        norm_query_emb = query_embedding / np.linalg.norm(query_embedding)
+
+        for doc in documents:
+            if doc.embedding is None:
+                continue
+
+            doc_embedding = np.array(doc.embedding)
+            norm_doc_emb = doc_embedding / np.linalg.norm(doc_embedding)
+
+            # Cosine similarity is the dot product of normalized vectors
+            similarity = np.dot(norm_query_emb, norm_doc_emb)
+            scored_docs.append((doc, float(similarity)))
+
+        # 4. Sort results by score (descending)
+        scored_docs.sort(key=lambda item: item[1], reverse=True)
+
+        # 5. Map to final response format
+        return [
+            document_to_scored_game_dict(doc, score) for doc, score in scored_docs
+        ]
 
     def get_game_by_mysql_id(self, game_mysql_id: int) -> dict | None:
         """Busca um jogo pelo seu ID original do MySQL."""
@@ -192,20 +276,25 @@ class RecommendationService:
         only the required page of documents, ensuring scalability.
         """
         try:
-            documents, total_games, normalized_page, normalized_per_page = self.repository.list_paginated(page, per_page)
+            (
+                documents,
+                total_games,
+                normalized_page,
+                normalized_per_page,
+            ) = self.repository.list_paginated(page, per_page)
             games_list = [document_to_game_dict(doc) for doc in documents]
-            
+
             return {
                 "page": normalized_page,
                 "per_page": normalized_per_page,
                 "total": total_games,
-                "games": games_list
+                "games": games_list,
             }
         except Exception as e:
             # It's good practice to log the specific error.
             print(f"Error listing games with direct pagination: {e}")
             return {"page": page, "per_page": per_page, "total": 0, "games": []}
-    
+
     def insert_game(self, game_data: dict) -> bool:
         """
         Insere um novo jogo no ChromaDB.
@@ -213,8 +302,10 @@ class RecommendationService:
         """
         try:
             boardgames_data: list[dict] = [game_data]
-            
-            haystack_docs: list[Document] = prepare_haystack_documents(boardgames_data=boardgames_data)
+
+            haystack_docs: list[
+                Document
+            ] = prepare_haystack_documents(boardgames_data=boardgames_data)
 
             self.repository.index_documents(
                 documents=haystack_docs,
@@ -225,5 +316,6 @@ class RecommendationService:
         except Exception as e:
             print(f"Erro ao inserir jogo: {e}")
             return False
+
 
 recommendation_service_instance = RecommendationService()
